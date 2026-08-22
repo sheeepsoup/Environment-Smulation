@@ -300,4 +300,43 @@ namespace lve {
         flowBuffersMapped.clear();
     }
 
+    void LveCompute::runErosionSync(LveDevice& device, uint32_t bufferIndex, int mapVertexCount, std::vector<int32_t>& heightData,
+        std::vector<uint32_t>& flowData, VkDeviceSize bufferSize) {
+        //计算地形
+        updateStorageBuffer(bufferIndex, heightData.data(), bufferSize);
+        //提交一次计算
+        VkCommandBuffer computeCmdBuf;
+        VkCommandBufferAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        allocInfo.commandPool = device.getCommandPool();
+        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocInfo.commandBufferCount = 1;
+        vkAllocateCommandBuffers(device.getDevice(), &allocInfo, &computeCmdBuf);
+
+        VkCommandBufferBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(computeCmdBuf, &beginInfo);
+        recordComputeCommands(computeCmdBuf, bufferIndex, mapVertexCount); // 只跑一次，用第0帧的 descriptor
+        vkEndCommandBuffer(computeCmdBuf);
+
+        VkSubmitInfo submitInfo{};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &computeCmdBuf;
+
+        VkFence computeFence;
+        VkFenceCreateInfo fenceInfo{};
+        fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        vkCreateFence(device.getDevice(), &fenceInfo, nullptr, &computeFence);
+
+        vkQueueSubmit(device.getGraphicsQueue(), 1, &submitInfo, computeFence);
+        vkWaitForFences(device.getDevice(), 1, &computeFence, VK_TRUE, UINT64_MAX);
+        vkDestroyFence(device.getDevice(), computeFence, nullptr);
+        vkFreeCommandBuffers(device.getDevice(), device.getCommandPool(), 1, &computeCmdBuf);
+        //计算完毕拷回来
+        memcpy(heightData.data(), getMappedData(bufferIndex), bufferSize);
+        memcpy(flowData.data(),getFlowMappedData(bufferIndex), sizeof(uint32_t) * flowData.size());
+       
+    };
 } // namespace lve

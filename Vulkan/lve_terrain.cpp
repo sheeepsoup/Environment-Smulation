@@ -132,17 +132,48 @@ namespace lve {
 		//清理顶点
 		vertices.clear();
 		indices.clear();
+		
 		initNoise(seed);//初始化噪声
 		const int chunkCount = 2 * BlockNum - 1;
-
 		const int mapVertexCount = chunkCount * (BlockVertexNum - 1) + 1;
 		this->mapVertexCount = mapVertexCount;
+		const float step = BlockDistance / (BlockVertexNum - 1);
+		const float mapOrigin = (-BlockNum + 1) * BlockDistance;
+
 		//分配顶点
 		heightData.resize(mapVertexCount * mapVertexCount);
 		vertices.resize(static_cast<size_t>(mapVertexCount) * mapVertexCount);
+
+		//多线程生成区块
+		std::atomic<int> nextRow{ 0 };
+		uint32_t threadCount = std::thread::hardware_concurrency();
+		if (threadCount == 0)threadCount = 4;//失败后为4
+		threadCount = glm::min(threadCount,static_cast<uint32_t>(mapVertexCount));//避免创建空闲的线程
+		std::vector<std::thread> workers;
+		workers.reserve(threadCount);
+		for (unsigned int threadIndex = 0;threadIndex < threadCount;threadIndex++) {
+			workers.emplace_back([this,&nextRow,mapVertexCount,mapOrigin,step]() {
+					while (true) {
+						int globalY =nextRow.fetch_add(1,std::memory_order_relaxed);
+						if (globalY >= mapVertexCount)break;
+						const float worldY =mapOrigin + globalY * step;
+						for (int globalX = 0;globalX < mapVertexCount;globalX++) {
+							const float worldX =mapOrigin + globalX * step;
+							const size_t vertexIndex =static_cast<size_t>(globalY) *mapVertexCount +globalX;
+							const float height = getHeight(worldX, worldY, true);
+							heightData[vertexIndex] = height;
+							vertices[vertexIndex] = {glm::vec3(worldX,worldY,height),glm::vec3(1.0f),WorldUp,0.0f};
+						}
+					}
+				});
+		}
+		//等待线程完毕
+		for (auto& worker : workers)worker.join();
+		indices.resize((mapVertexCount - 1) * (mapVertexCount - 1) * 6);
 		//生成区块[0,0->初始地区]
 		for (int x = -BlockNum + 1; x < BlockNum; x++) {//遍历2 * n - 1次[例如区块为6,x方向遍历11次]
 			for (int y = -BlockNum + 1; y < BlockNum; y++) {//x,y表示当前对应的区块
+				/*这块是单线程生成,单纯保留纪念一下
 				uint32_t baseVertex = static_cast<uint32_t>(vertices.size());
 				//暂时先全部正方形生成,后面改成圆形
 				float orgianX = x * BlockDistance;
@@ -171,33 +202,72 @@ namespace lve {
 					}
 
 				}
+				*/
 				//填充indices
+				const int chunkX = x + BlockNum - 1;
+				const int chunkY = y + BlockNum - 1;
 				for (int i = 0; i < BlockVertexNum - 1; i++) {
 					for (int j = 0; j < BlockVertexNum - 1; j++) {
 						const int globalX = chunkX * (BlockVertexNum - 1) + j;
 						const int globalY = chunkY * (BlockVertexNum - 1) + i;
 						const uint32_t nowPoint = static_cast<uint32_t>(globalY * mapVertexCount + globalX);
-						indices.push_back(nowPoint);
-						indices.push_back(nowPoint + 1);
-						indices.push_back(nowPoint + mapVertexCount);
-						indices.push_back(nowPoint + 1);
-						indices.push_back(nowPoint + 1 + mapVertexCount);
-						indices.push_back(nowPoint + mapVertexCount);
+						const size_t offset =(static_cast<size_t>(globalY) * (mapVertexCount - 1) +static_cast<size_t>(globalX)) * 6;
+						indices[offset] = nowPoint;
+						indices[offset + 1] = nowPoint + 1;
+						indices[offset + 2] = nowPoint + mapVertexCount;
+						indices[offset + 3] = nowPoint + 1;
+						indices[offset + 4] = nowPoint + 1 + mapVertexCount;
+						indices[offset + 5] = nowPoint + mapVertexCount;
 					}
 				}
 			}
 		}
-
 		//锈蚀模拟
 		//threadRunErosion();
 
 
 	}
 	void LveTerrain::calculateNormal() {
-		const int chunkCount = 2 * BlockNum - 1;
 
-		const int mapVertexCount = chunkCount * (BlockVertexNum - 1) + 1;
-		//计算法线
+		//多线程计算法线
+		std::atomic<int> nextRow{ 1 };
+		unsigned int threadCount = std::thread::hardware_concurrency();
+		if (threadCount == 0)threadCount = 4;
+		std::vector<std::thread> workers;
+		workers.reserve(threadCount);
+
+		for (unsigned int threadIndex = 0;
+			threadIndex < threadCount;
+			threadIndex++) {
+
+			workers.emplace_back([this, &nextRow]() {
+				while (true) {
+					const int chunkCount = 2 * BlockNum - 1;
+					const int mapVertexCountw = chunkCount * (BlockVertexNum - 1) + 1;
+					const int gridY =nextRow.fetch_add(1,std::memory_order_relaxed);
+
+					if (gridY >= mapVertexCountw - 1) {
+						break;
+					}
+
+					for (int gridX = 1;
+						gridX < mapVertexCountw - 1;
+						gridX++) {
+
+						const glm::vec2 gridPosition{static_cast<float>(gridX),static_cast<float>(gridY)};
+
+						const uint32_t index = getVertexIndex(gridPosition);
+
+						vertices[index].normal =calculateNormalNew(gridPosition);
+					}
+				}
+				});
+		}
+
+		for (auto& worker : workers) {
+			worker.join();
+		}
+		/*依旧单线程纪念
 		for (int gridX = 1;gridX < mapVertexCount - 1;gridX++) {
 			for (int gridY = 1;gridY < mapVertexCount - 1;gridY++) {
 
@@ -208,6 +278,7 @@ namespace lve {
 				vertices.at(index).normal = calculateNormalNew(gridPosition);
 			}
 		}
+		*/
 	}
 	float LveTerrain::getHeight(float WorldX, float WorldY, bool isFirst) {
 		const float biomeValue = noise.biomeNoise.GetNoise(WorldX, WorldY);
@@ -501,5 +572,22 @@ namespace lve {
 
 		return glm::mix(bottomHeight, topHeight, offsetY);
 	}
+	void LveTerrain::updateHeightFlow(std::vector<int32_t>& heightUint, std::vector<uint32_t>& flowUint, float SCALE) {
+		//更新流量
+		const uint32_t maxFlow =
+		flowUint.empty() ? 0 : *std::max_element(flowUint.begin(), flowUint.end());
+		const float maxValue =std::log1p(static_cast<float>(maxFlow));
+		for (size_t i = 0;i < flowUint.size();i++) {
 
+			const float flow =std::log1p(static_cast<float>(flowUint[i]));
+			vertices[i].flow =maxValue > 0.0f? flow / maxValue: 0.0f;
+		}
+
+
+		//更新顶点高度
+		for (int i = 0; i < vertices.size(); i++) {
+			vertices[i].pos.z = heightUint[i] / SCALE;
+			heightData[i] = static_cast<float>(heightUint[i]) / SCALE;
+		}
+	}
 }

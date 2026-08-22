@@ -7,6 +7,7 @@
 #include<vector>
 #include<FastNoiseLite.h>
 #include <random>
+#include<thread>
 #include"lve_model.h"
 
 namespace lve {
@@ -20,7 +21,10 @@ namespace lve {
 			for (auto& vertex : vertices) {
 				vertex.pos *= scale;
 			}
-		}
+		};
+		void updateHeightFlow(std::vector<int32_t>& heightData, std::vector<uint32_t>& flowData, float SCALE);//更新从gpu拿到的侵蚀数据
+
+		uint32_t getMapVertexNum() { return mapVertexCount; };
 		std::vector<uint32_t>& getIndices() { return indices; };
 		const std::vector<uint32_t>& getIndices() const { return indices; };
 		std::vector<LveModel::Vertex> &getVertices() { return vertices; };
@@ -34,6 +38,7 @@ namespace lve {
 		#define MIN_WATER 0.01f//蒸发最小水量
 		#define MIN_SPEED 0.01f//最小速度
 		#define THREAD_PROCESS_NUM 1//线程处理次数
+
 		float capacityFactor = 4.0f;
 		float erosionRate = 0.1f;
 		float depositionRate = 0.03f;
@@ -44,7 +49,7 @@ namespace lve {
 		int BlockNum = 50;//区块数量
 		int BlockVertexNum = 20;//每个区块x/y对应的顶点数,该区块含有n*n个顶点
 		float BlockDistance = 5.0;//每个区块的x/y对应的距离大小
-
+		uint32_t cpuThreadNum;//cpu线程数
 
 		class CNoise
 		{

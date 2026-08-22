@@ -22,6 +22,10 @@
 #include <set>
 #include<vector>
 //----------------------------------------------------------------------------------------
+// 参数控制
+const int seed = 114514;//地图种子
+const float HEIGHT_FIXED_SCALE = 10000.0f;//这个用于int->float还原,不用改
+//----------------------------------------------------------------------------------------
 //本地无限地形生成开关
 bool unlimitedArea = false;
 //----------------------------------------------------------------------------------------
@@ -139,82 +143,51 @@ int main() {
 	//深度缓冲
 	swapChain.createDepthResources(device);
 	
-
-
-
 	//渲染过程----------------------------------
 	pipeLine.createShader(device.getDevice());//创建着色器模块
+	
 
+	using Clock = std::chrono::steady_clock;
 
+	auto start = Clock::now();
 	//初始化地形
-	terrain.processArea(114514);
+	terrain.processArea(seed);
 
+
+	auto afterTerrain = Clock::now();
+	std::cout << "terrain generation: "<< std::chrono::duration<float>(afterTerrain - start).count() << " seconds\n";
 
 	//创建计算着色器
-	VkDeviceSize computeBufferSize = sizeof(int32_t) * 	terrain.getHeightData().size();
+	VkDeviceSize computeBufferSize = sizeof(int32_t) * terrain.getHeightData().size();
 	compute.init(renderer.getMaxFramesInFlight(), computeBufferSize);
-	const float SCALE = 10000.0f;
-	std::vector<int32_t> heightUint(	terrain.getHeightData().size());//高度数据
+
+	
+	//侵蚀模拟计算
+	std::vector<int32_t> heightUint(terrain.getHeightData().size());//高度数据
 	std::vector<uint32_t> flowUint(	terrain.getHeightData().size(), 0);//流量数据
+	auto erosionStart = Clock::now();
 	for (size_t i = 0; i < 	terrain.getHeightData().size(); i++) {
-		heightUint[i] = static_cast<int32_t>(	terrain.getHeightData()[i] * SCALE + 0.5f);
+		heightUint[i] = static_cast<int32_t>(	terrain.getHeightData()[i] * HEIGHT_FIXED_SCALE + 0.5f);
 	}
-	for (int i = 0;i < 1;i++) {
+	compute.runErosionSync(device, 0, terrain.getMapVertexNum(), heightUint, flowUint, computeBufferSize);
+	terrain.updateHeightFlow(heightUint, flowUint, HEIGHT_FIXED_SCALE);
+	
 
-		//计算地形
-		compute.updateStorageBuffer(currentFrame, heightUint.data(), computeBufferSize);
-		//提交一次计算
-		VkCommandBuffer computeCmdBuf;
-		VkCommandBufferAllocateInfo allocInfo{};
-		allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-		allocInfo.commandPool = device.getCommandPool();
-		allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-		allocInfo.commandBufferCount = 1;
-		vkAllocateCommandBuffers(device.getDevice(), &allocInfo, &computeCmdBuf);
+	
+	auto erosionEnd = Clock::now();
 
-		VkCommandBufferBeginInfo beginInfo{};
-		beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-		beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-		vkBeginCommandBuffer(computeCmdBuf, &beginInfo);
-		compute.recordComputeCommands(computeCmdBuf, 0, terrain.mapVertexCount); // 只跑一次，用第0帧的 descriptor
-		vkEndCommandBuffer(computeCmdBuf);
-
-		VkSubmitInfo submitInfo{};
-		submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-		submitInfo.commandBufferCount = 1;
-		submitInfo.pCommandBuffers = &computeCmdBuf;
-
-		VkFence computeFence;
-		VkFenceCreateInfo fenceInfo{};
-		fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-		vkCreateFence(device.getDevice(), &fenceInfo, nullptr, &computeFence);
-
-		vkQueueSubmit(device.getGraphicsQueue(), 1, &submitInfo, computeFence);
-		vkWaitForFences(device.getDevice(), 1, &computeFence, VK_TRUE, UINT64_MAX);
-		vkDestroyFence(device.getDevice(), computeFence, nullptr);
-		vkFreeCommandBuffers(device.getDevice(), device.getCommandPool(), 1, &computeCmdBuf);
-		//计算完毕拷回来
-		memcpy(heightUint.data(), compute.getMappedData(currentFrame), computeBufferSize);
-		for (size_t i = 0; i < 	terrain.getHeightData().size(); i++) {
-				terrain.getHeightData()[i] = static_cast<float>(heightUint[i]) / SCALE;
-		}
-
-		memcpy(flowUint.data(),compute.getFlowMappedData(0),sizeof(uint32_t)* flowUint.size());
-		uint32_t maxFlow = *std::max_element(flowUint.begin(), flowUint.end());
-
-		for (size_t i = 0; i < flowUint.size(); i++) {
-			float flow = std::log1p(static_cast<float>(flowUint[i]));
-			float maxValue = std::log1p(static_cast<float>(maxFlow));
-			terrain.getVertices()[i].flow = maxValue > 0.0f ? flow / maxValue : 0.0f;
-		}
-		//更新高度
-		for (int i = 0; i < terrain.getVertices().size(); i++) {
-			terrain.getVertices()[i].pos.z = 	terrain.getHeightData()[i];
-		}
-
-	}
+	std::cout << "GPU erosion: "
+		<< std::chrono::duration<float>(
+			erosionEnd - erosionStart).count()
+		<< " seconds\n";
 	// 重新计算法线
+	auto normalStart = Clock::now();
 	terrain.calculateNormal(); //
+	auto normalEnd = Clock::now();
+	std::cout << "normal calculation: "
+		<< std::chrono::duration<float>(
+			normalEnd - normalStart).count()
+		<< " seconds\n";
 
 	//放大地形
 	terrain.SetModelSize(2);

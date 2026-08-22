@@ -39,6 +39,10 @@ namespace lve {
         void* getFlowMappedData(uint32_t frameIndex) const {
             return flowBuffersMapped[frameIndex];
         }
+
+
+        void runErosionSync(LveDevice& device, uint32_t bufferIndex, int mapVertexCount, std::vector<int32_t>& heightData,
+            std::vector<uint32_t>& flowData, VkDeviceSize bufferSize);
     private:
         LveDevice& device;
         std::string computeShaderPath;
